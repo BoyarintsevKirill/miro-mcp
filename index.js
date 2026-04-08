@@ -261,7 +261,7 @@ server.registerTool(
   "create_content_item",
   {
     description:
-      "Create a content item using the current board style. Automatically creates the right element type (sticky note, shape, or card) based on set_board_style. Use this instead of create_sticky_note/create_shape for consistent boards.",
+      "Create a content item using the current board style. One item = one thought (1-3 lines). Automatically creates the right element type (sticky note, shape, or card) based on set_board_style. Use this for consistent boards.",
     inputSchema: {
       board_id: z.string().describe("Board ID"),
       content: z.string().describe("Text content (or title for cards)"),
@@ -348,7 +348,7 @@ server.registerTool(
   "layout_in_frame",
   {
     description:
-      "Create multiple content items inside a frame, automatically positioned in a grid. Respects current board style (stickers/shapes/cards) and theme. Reads frame dimensions, calculates positions -- nothing overlaps or escapes the frame.",
+      "Create multiple content items inside a frame in a grid layout. Each item should contain ONE thought (1-3 lines max). Split long lists into separate items. Respects board style and theme. Auto-sizes items to fit frame. Nothing overlaps or escapes.",
     inputSchema: {
       board_id: z.string().describe("Board ID"),
       frame_id: z.string().describe("Frame ID to place items inside"),
@@ -575,7 +575,7 @@ server.registerTool(
   "create_sticky_note",
   {
     description:
-      "Create a sticky note on a board. Uses the current theme for colors. Coordinates are auto-snapped to a 50px grid for clean alignment.",
+      "Create a sticky note on a board. IMPORTANT: one sticky = one thought. Keep text to 1-3 lines max. If you have multiple points, create multiple stickies. Uses the current theme for colors. Coordinates are auto-snapped to a 50px grid.",
     inputSchema: {
       board_id: z.string().describe("Board ID"),
       content: z.string().describe("Text content of the sticky note"),
