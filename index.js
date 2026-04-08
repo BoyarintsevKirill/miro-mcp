@@ -1,7 +1,10 @@
 #!/usr/bin/env node
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+
+// Load .env if available
+try { const { config } = await import("dotenv"); config(); } catch {}
 
 const MIRO_API = "https://api.miro.com/v2";
 const TOKEN = process.env.MIRO_TOKEN;
@@ -13,26 +16,43 @@ if (!TOKEN) {
 
 // --- Miro API helpers ---
 
-async function miroFetch(path, options = {}) {
+async function miroFetch(path, options = {}, _retries = 2) {
   const url = path.startsWith("http") ? path : `${MIRO_API}${path}`;
   const res = await fetch(url, {
     ...options,
     headers: {
       Authorization: `Bearer ${TOKEN}`,
-      "Content-Type": "application/json",
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
       ...options.headers,
     },
   });
   const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`Miro API ${res.status}: ${text}`);
+
+  // Retry on rate limit
+  if (res.status === 429 && _retries > 0) {
+    const wait = parseInt(res.headers.get("Retry-After") || "5", 10);
+    await new Promise((r) => setTimeout(r, wait * 1000));
+    return miroFetch(path, options, _retries - 1);
   }
-  return text ? JSON.parse(text) : null;
+
+  if (!res.ok) {
+    let parsed = null;
+    try { parsed = JSON.parse(text); } catch {}
+    return { error: { status: res.status, message: parsed?.message || text, code: parsed?.code || null } };
+  }
+  return { data: text ? JSON.parse(text) : null };
 }
 
 function ok(data) {
   return {
     content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+  };
+}
+
+function fail(error) {
+  return {
+    content: [{ type: "text", text: `Miro API error ${error.status}: ${error.message}${error.code ? ` (${error.code})` : ""}` }],
+    isError: true,
   };
 }
 
@@ -181,8 +201,30 @@ function stickyColor(semantic) {
 // --- Server ---
 
 const server = new McpServer(
-  { name: "miro-mcp", version: "1.0.0" },
+  { name: "miro-mcp", version: "2.0.0" },
   { capabilities: {} }
+);
+
+// ==================== META ====================
+
+server.registerTool(
+  "list_tools",
+  {
+    description: "List all available Miro MCP tools grouped by category. Call this first when unsure what to do.",
+    inputSchema: {},
+  },
+  async () => ok({
+    workflow: "1. list_boards -> 2. set_theme + set_board_style -> 3. create_frame -> 4. layout_in_frame or create_content_item -> 5. create_connector",
+    setup: ["list_tools", "set_theme", "get_theme", "set_board_style"],
+    boards: ["create_board", "list_boards", "get_board", "get_all_items", "get_item"],
+    frames: ["create_frame", "update_frame", "list_frames", "get_frame_bounds"],
+    elements: ["create_sticky_note", "update_sticky_note", "create_shape", "update_shape", "create_text", "update_text", "create_card", "update_card", "create_image"],
+    layout: ["layout_in_frame", "create_content_item"],
+    relations: ["create_connector", "create_tag", "get_tags", "attach_tag"],
+    bulk: ["bulk_create_sticky_notes", "bulk_delete_items"],
+    actions: ["move_item", "delete_item"],
+    note: "board_id is required for all element operations. Get it from list_boards first.",
+  })
 );
 
 // ==================== THEME ====================
@@ -292,10 +334,12 @@ server.registerTool(
       if (y !== undefined) body.position.y = snap(y);
       if (width) body.geometry = { width };
       if (parent_id) body.parent = { id: parent_id };
-      data = await miroFetch(boardPath(board_id, "/sticky_notes"), {
+      const { data: result, error } = await miroFetch(boardPath(board_id, "/sticky_notes"), {
         method: "POST",
         body: JSON.stringify(body),
       });
+      if (error) return fail(error);
+      data = result;
     } else if (style.content === "shape") {
       const fillColor = semantic === "negative" ? "#FDE8E8"
         : semantic === "positive" ? "#E8F5E9"
@@ -320,10 +364,12 @@ server.registerTool(
         if (height) body.geometry.height = height;
       }
       if (parent_id) body.parent = { id: parent_id };
-      data = await miroFetch(boardPath(board_id, "/shapes"), {
+      const { data: result, error } = await miroFetch(boardPath(board_id, "/shapes"), {
         method: "POST",
         body: JSON.stringify(body),
       });
+      if (error) return fail(error);
+      data = result;
     } else if (style.content === "card") {
       const body = {
         data: { title: content },
@@ -333,10 +379,12 @@ server.registerTool(
       if (x !== undefined) body.position.x = snap(x);
       if (y !== undefined) body.position.y = snap(y);
       if (parent_id) body.parent = { id: parent_id };
-      data = await miroFetch(boardPath(board_id, "/cards"), {
+      const { data: result, error } = await miroFetch(boardPath(board_id, "/cards"), {
         method: "POST",
         body: JSON.stringify(body),
       });
+      if (error) return fail(error);
+      data = result;
     }
     return ok(data);
   }
@@ -369,7 +417,8 @@ server.registerTool(
     },
   },
   async ({ board_id, frame_id, columns, item_width, items }) => {
-    const frame = await miroFetch(boardPath(board_id, `/frames/${frame_id}`));
+    const { data: frame, error: frameError } = await miroFetch(boardPath(board_id, `/frames/${frame_id}`));
+    if (frameError) return fail(frameError);
     const fw = frame.geometry.width;
     const fh = frame.geometry.height;
     const cols = columns || Math.min(items.length, Math.max(2, Math.ceil(Math.sqrt(items.length))));
@@ -385,46 +434,43 @@ server.registerTool(
       const pos = frameCell({ width: fw, height: fh }, col, row, cols);
       const sem = items[i].semantic || "primary";
 
-      try {
-        let data;
-        if (style.content === "sticky_note") {
-          data = await miroFetch(boardPath(board_id, "/sticky_notes"), {
-            method: "POST",
-            body: JSON.stringify({
-              data: { content: items[i].content },
-              style: { fillColor: stickyColor(sem) },
-              position: { x: pos.x, y: pos.y },
-              geometry: { width: autoWidth },
-              parent: { id: frame_id },
-            }),
-          });
-        } else if (style.content === "shape") {
-          const fillColor = sem === "negative" ? "#FDE8E8" : sem === "positive" ? "#E8F5E9" : sem === "accent" ? "#FFF3E0" : sem === "secondary" ? "#E8F4FD" : t.shape.fill;
-          const borderColor = sem === "negative" ? "#E74C3C" : sem === "positive" ? "#4CAF50" : sem === "accent" ? "#FF9800" : sem === "secondary" ? "#2196F3" : t.shape.border;
-          data = await miroFetch(boardPath(board_id, "/shapes"), {
-            method: "POST",
-            body: JSON.stringify({
-              data: { content: items[i].content, shape: "round_rectangle" },
-              style: { fillColor, borderColor },
-              position: { x: pos.x, y: pos.y },
-              geometry: { width: 200, height: 150 },
-              parent: { id: frame_id },
-            }),
-          });
-        } else if (style.content === "card") {
-          data = await miroFetch(boardPath(board_id, "/cards"), {
-            method: "POST",
-            body: JSON.stringify({
-              data: { title: items[i].content, description: items[i].description || "" },
-              position: { x: pos.x, y: pos.y },
-              parent: { id: frame_id },
-            }),
-          });
-        }
-        results.push({ success: true, id: data?.id });
-      } catch (err) {
-        results.push({ success: false, error: err.message });
+      let data, error;
+      if (style.content === "sticky_note") {
+        ({ data, error } = await miroFetch(boardPath(board_id, "/sticky_notes"), {
+          method: "POST",
+          body: JSON.stringify({
+            data: { content: items[i].content },
+            style: { fillColor: stickyColor(sem) },
+            position: { x: pos.x, y: pos.y },
+            geometry: { width: autoWidth },
+            parent: { id: frame_id },
+          }),
+        }));
+      } else if (style.content === "shape") {
+        const fillColor = sem === "negative" ? "#FDE8E8" : sem === "positive" ? "#E8F5E9" : sem === "accent" ? "#FFF3E0" : sem === "secondary" ? "#E8F4FD" : t.shape.fill;
+        const borderColor = sem === "negative" ? "#E74C3C" : sem === "positive" ? "#4CAF50" : sem === "accent" ? "#FF9800" : sem === "secondary" ? "#2196F3" : t.shape.border;
+        ({ data, error } = await miroFetch(boardPath(board_id, "/shapes"), {
+          method: "POST",
+          body: JSON.stringify({
+            data: { content: items[i].content, shape: "round_rectangle" },
+            style: { fillColor, borderColor },
+            position: { x: pos.x, y: pos.y },
+            geometry: { width: 200, height: 150 },
+            parent: { id: frame_id },
+          }),
+        }));
+      } else if (style.content === "card") {
+        ({ data, error } = await miroFetch(boardPath(board_id, "/cards"), {
+          method: "POST",
+          body: JSON.stringify({
+            data: { title: items[i].content, description: items[i].description || "" },
+            position: { x: pos.x, y: pos.y },
+            parent: { id: frame_id },
+          }),
+        }));
       }
+      if (error) { results.push({ success: false, error: error.message }); continue; }
+      results.push({ success: true, id: data?.id });
     }
     return ok({ frame: { id: frame_id, width: fw, height: fh }, style: style.content, columns: cols, created: results.filter(r => r.success).length, results });
   }
@@ -441,7 +487,8 @@ server.registerTool(
     },
   },
   async ({ board_id, frame_id }) => {
-    const frame = await miroFetch(boardPath(board_id, `/frames/${frame_id}`));
+    const { data: frame, error } = await miroFetch(boardPath(board_id, `/frames/${frame_id}`));
+    if (error) return fail(error);
     const fx = frame.position.x;
     const fy = frame.position.y;
     const fw = frame.geometry.width;
@@ -480,10 +527,11 @@ server.registerTool(
   async ({ name, description }) => {
     const body = { name };
     if (description) body.description = description;
-    const data = await miroFetch("/boards", {
+    const { data, error } = await miroFetch("/boards", {
       method: "POST",
       body: JSON.stringify(body),
     });
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -502,7 +550,8 @@ server.registerTool(
     if (query) params.set("query", query);
     if (limit) params.set("limit", String(limit));
     const qs = params.toString();
-    const data = await miroFetch(`/boards${qs ? `?${qs}` : ""}`);
+    const { data, error } = await miroFetch(`/boards${qs ? `?${qs}` : ""}`);
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -516,7 +565,8 @@ server.registerTool(
     },
   },
   async ({ board_id }) => {
-    const data = await miroFetch(boardPath(board_id));
+    const { data, error } = await miroFetch(boardPath(board_id));
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -544,9 +594,10 @@ server.registerTool(
     if (limit) params.set("limit", String(limit));
     if (cursor) params.set("cursor", cursor);
     const qs = params.toString();
-    const data = await miroFetch(
+    const { data, error } = await miroFetch(
       boardPath(board_id, `/items${qs ? `?${qs}` : ""}`)
     );
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -564,7 +615,8 @@ server.registerTool(
   async ({ board_id, item_id, type }) => {
     const typeMap = { sticky_note: "sticky_notes", shape: "shapes", text: "texts", frame: "frames", card: "cards", image: "images", document: "documents", connector: "connectors" };
     const path = typeMap[type] || type;
-    const data = await miroFetch(boardPath(board_id, `/${path}/${item_id}`));
+    const { data, error } = await miroFetch(boardPath(board_id, `/${path}/${item_id}`));
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -611,10 +663,11 @@ server.registerTool(
     if (y !== undefined) body.position.y = snap(y);
     if (width) body.geometry = { width };
     if (parent_id) body.parent = { id: parent_id };
-    const data = await miroFetch(boardPath(board_id, "/sticky_notes"), {
+    const { data, error } = await miroFetch(boardPath(board_id, "/sticky_notes"), {
       method: "POST",
       body: JSON.stringify(body),
     });
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -641,10 +694,11 @@ server.registerTool(
       if (x !== undefined) body.position.x = x;
       if (y !== undefined) body.position.y = y;
     }
-    const data = await miroFetch(
+    const { data, error } = await miroFetch(
       boardPath(board_id, `/sticky_notes/${item_id}`),
       { method: "PATCH", body: JSON.stringify(body) }
     );
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -700,10 +754,11 @@ server.registerTool(
       if (height) body.geometry.height = height;
     }
     if (parent_id) body.parent = { id: parent_id };
-    const data = await miroFetch(boardPath(board_id, "/shapes"), {
+    const { data, error } = await miroFetch(boardPath(board_id, "/shapes"), {
       method: "POST",
       body: JSON.stringify(body),
     });
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -737,10 +792,11 @@ server.registerTool(
       if (width) body.geometry.width = width;
       if (height) body.geometry.height = height;
     }
-    const data = await miroFetch(boardPath(board_id, `/shapes/${item_id}`), {
+    const { data, error } = await miroFetch(boardPath(board_id, `/shapes/${item_id}`), {
       method: "PATCH",
       body: JSON.stringify(body),
     });
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -771,10 +827,11 @@ server.registerTool(
     body.style.fontSize = font_size || "14";
     body.style.color = color || t.text.body;
     if (parent_id) body.parent = { id: parent_id };
-    const data = await miroFetch(boardPath(board_id, "/texts"), {
+    const { data, error } = await miroFetch(boardPath(board_id, "/texts"), {
       method: "POST",
       body: JSON.stringify(body),
     });
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -799,10 +856,11 @@ server.registerTool(
       if (x !== undefined) body.position.x = x;
       if (y !== undefined) body.position.y = y;
     }
-    const data = await miroFetch(boardPath(board_id, `/texts/${item_id}`), {
+    const { data, error } = await miroFetch(boardPath(board_id, `/texts/${item_id}`), {
       method: "PATCH",
       body: JSON.stringify(body),
     });
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -831,10 +889,11 @@ server.registerTool(
     if (y !== undefined) body.position.y = snap(y);
     body.geometry = { width: width || 800, height: height || 600 };
     body.style.fillColor = color || t.frame.fill;
-    const data = await miroFetch(boardPath(board_id, "/frames"), {
+    const { data, error } = await miroFetch(boardPath(board_id, "/frames"), {
       method: "POST",
       body: JSON.stringify(body),
     });
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -866,11 +925,29 @@ server.registerTool(
       if (width) body.geometry.width = width;
       if (height) body.geometry.height = height;
     }
-    const data = await miroFetch(boardPath(board_id, `/frames/${item_id}`), {
+    const { data, error } = await miroFetch(boardPath(board_id, `/frames/${item_id}`), {
       method: "PATCH",
       body: JSON.stringify(body),
     });
+    if (error) return fail(error);
     return ok(data);
+  }
+);
+
+server.registerTool(
+  "list_frames",
+  {
+    description: "List all frames on a board with IDs, titles, positions and sizes. Use to navigate board structure before working inside frames.",
+    inputSchema: { board_id: z.string().describe("Board ID") },
+  },
+  async ({ board_id }) => {
+    const { data, error } = await miroFetch(boardPath(board_id, "/items?type=frame&limit=50"));
+    if (error) return fail(error);
+    const frames = (data.data || []).map(f => ({
+      id: f.id, title: f.data?.title, x: f.position?.x, y: f.position?.y,
+      width: f.geometry?.width, height: f.geometry?.height,
+    }));
+    return ok(frames);
   }
 );
 
@@ -897,10 +974,46 @@ server.registerTool(
     if (x !== undefined) body.position.x = snap(x);
     if (y !== undefined) body.position.y = snap(y);
     if (parent_id) body.parent = { id: parent_id };
-    const data = await miroFetch(boardPath(board_id, "/cards"), {
+    const { data, error } = await miroFetch(boardPath(board_id, "/cards"), {
       method: "POST",
       body: JSON.stringify(body),
     });
+    if (error) return fail(error);
+    return ok(data);
+  }
+);
+
+server.registerTool(
+  "update_card",
+  {
+    description: "Update a card (title, description, due date, position)",
+    inputSchema: {
+      board_id: z.string().describe("Board ID"),
+      item_id: z.string().describe("Card item ID"),
+      title: z.string().optional().describe("New title"),
+      description: z.string().optional().describe("New description"),
+      due_date: z.string().optional().describe("New due date (ISO 8601)"),
+      x: z.number().optional().describe("New X position"),
+      y: z.number().optional().describe("New Y position"),
+    },
+  },
+  async ({ board_id, item_id, title, description, due_date, x, y }) => {
+    const body = {};
+    if (title !== undefined || description !== undefined || due_date !== undefined) {
+      body.data = {};
+      if (title !== undefined) body.data.title = title;
+      if (description !== undefined) body.data.description = description;
+      if (due_date !== undefined) body.data.dueDate = due_date;
+    }
+    if (x !== undefined || y !== undefined) {
+      body.position = {};
+      if (x !== undefined) body.position.x = snap(x);
+      if (y !== undefined) body.position.y = snap(y);
+    }
+    const { data, error } = await miroFetch(boardPath(board_id, `/cards/${item_id}`), {
+      method: "PATCH", body: JSON.stringify(body),
+    });
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -944,10 +1057,11 @@ server.registerTool(
       strokeWidth: stroke_width || t.connector.width,
       strokeStyle: lineStyle || "normal",
     };
-    const data = await miroFetch(boardPath(board_id, "/connectors"), {
+    const { data, error } = await miroFetch(boardPath(board_id, "/connectors"), {
       method: "POST",
       body: JSON.stringify(body),
     });
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -972,10 +1086,11 @@ server.registerTool(
   async ({ board_id, title, color }) => {
     const body = { title };
     if (color) body.fillColor = color;
-    const data = await miroFetch(boardPath(board_id, "/tags"), {
+    const { data, error } = await miroFetch(boardPath(board_id, "/tags"), {
       method: "POST",
       body: JSON.stringify(body),
     });
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -991,11 +1106,25 @@ server.registerTool(
     },
   },
   async ({ board_id, item_id, tag_id }) => {
-    await miroFetch(
-      boardPath(board_id, `/items/${item_id}?tag_id=${tag_id}`),
+    const { error } = await miroFetch(
+      boardPath(board_id, `/items/${item_id}/tags/${tag_id}`),
       { method: "POST" }
     );
+    if (error) return fail(error);
     return ok({ success: true, item_id, tag_id });
+  }
+);
+
+server.registerTool(
+  "get_tags",
+  {
+    description: "List all tags on a board. Call before attach_tag to find existing tag IDs.",
+    inputSchema: { board_id: z.string().describe("Board ID") },
+  },
+  async ({ board_id }) => {
+    const { data, error } = await miroFetch(boardPath(board_id, "/tags"));
+    if (error) return fail(error);
+    return ok(data);
   }
 );
 
@@ -1011,9 +1140,10 @@ server.registerTool(
     },
   },
   async ({ board_id, item_id }) => {
-    await miroFetch(boardPath(board_id, `/items/${item_id}`), {
+    const { error } = await miroFetch(boardPath(board_id, `/items/${item_id}`), {
       method: "DELETE",
     });
+    if (error) return fail(error);
     return ok({ deleted: item_id });
   }
 );
@@ -1041,10 +1171,11 @@ server.registerTool(
     if (y !== undefined) body.position.y = snap(y);
     if (width) body.geometry = { width };
     if (parent_id) body.parent = { id: parent_id };
-    const data = await miroFetch(boardPath(board_id, "/images"), {
+    const { data, error } = await miroFetch(boardPath(board_id, "/images"), {
       method: "POST",
       body: JSON.stringify(body),
     });
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -1066,10 +1197,11 @@ server.registerTool(
   async ({ board_id, item_id, type, x, y }) => {
     const typeMap = { sticky_note: "sticky_notes", shape: "shapes", text: "texts", frame: "frames", card: "cards", image: "images" };
     const path = typeMap[type] || type;
-    const data = await miroFetch(boardPath(board_id, `/${path}/${item_id}`), {
+    const { data, error } = await miroFetch(boardPath(board_id, `/${path}/${item_id}`), {
       method: "PATCH",
       body: JSON.stringify({ position: { x: snap(x), y: snap(y) } }),
     });
+    if (error) return fail(error);
     return ok(data);
   }
 );
@@ -1102,27 +1234,81 @@ server.registerTool(
   async ({ board_id, notes }) => {
     const results = [];
     for (const note of notes) {
-      try {
-        const fillColor = note.color || stickyColor(note.semantic || "primary");
-        const body = {
-          data: { content: note.content },
-          style: { fillColor },
-          position: {},
-        };
-        if (note.x !== undefined) body.position.x = snap(note.x);
-        if (note.y !== undefined) body.position.y = snap(note.y);
-        const data = await miroFetch(boardPath(board_id, "/sticky_notes"), {
-          method: "POST",
-          body: JSON.stringify(body),
-        });
-        results.push({ success: true, data });
-      } catch (err) {
-        results.push({ success: false, error: err.message, note });
-      }
+      const fillColor = note.color || stickyColor(note.semantic || "primary");
+      const body = {
+        data: { content: note.content },
+        style: { fillColor },
+        position: {},
+      };
+      if (note.x !== undefined) body.position.x = snap(note.x);
+      if (note.y !== undefined) body.position.y = snap(note.y);
+      const { data, error } = await miroFetch(boardPath(board_id, "/sticky_notes"), {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (error) { results.push({ success: false, error: error.message, note }); continue; }
+      results.push({ success: true, data });
     }
     return ok(results);
   }
 );
+
+server.registerTool(
+  "bulk_delete_items",
+  {
+    description: "Delete multiple items at once. Returns per-item status.",
+    inputSchema: {
+      board_id: z.string().describe("Board ID"),
+      item_ids: z.array(z.string()).describe("Array of item IDs to delete"),
+    },
+  },
+  async ({ board_id, item_ids }) => {
+    const results = [];
+    for (const id of item_ids) {
+      const { error } = await miroFetch(boardPath(board_id, `/items/${id}`), { method: "DELETE" });
+      results.push(error ? { id, success: false, error: error.message } : { id, success: true });
+    }
+    return ok({ total: item_ids.length, deleted: results.filter(r => r.success).length, results });
+  }
+);
+
+// ==================== RESOURCES ====================
+
+server.registerResource(
+  "miro-boards",
+  "miro://boards",
+  { description: "List all Miro boards accessible with current token", mimeType: "application/json" },
+  async (uri) => {
+    const { data, error } = await miroFetch("/boards?limit=50");
+    if (error) throw new Error(error.message);
+    const boards = (data.data || []).map(b => ({ id: b.id, name: b.name, description: b.description, url: b.viewLink }));
+    return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(boards, null, 2) }] };
+  }
+);
+
+server.registerResource(
+  "miro-board",
+  new ResourceTemplate("miro://boards/{boardId}", { list: undefined }),
+  { description: "Content snapshot of a Miro board with all items", mimeType: "application/json" },
+  async (uri, { boardId }) => {
+    const [boardRes, itemsRes] = await Promise.all([
+      miroFetch(`/boards/${boardId}`),
+      miroFetch(`/boards/${boardId}/items?limit=50`),
+    ]);
+    if (boardRes.error) throw new Error(boardRes.error.message);
+    const board = boardRes.data;
+    const items = (itemsRes.data?.data || []).map(i => ({
+      id: i.id, type: i.type,
+      content: i.data?.content ?? i.data?.title ?? null,
+      x: i.position?.x, y: i.position?.y,
+      width: i.geometry?.width, height: i.geometry?.height,
+    }));
+    return {
+      contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify({ id: board.id, name: board.name, items }, null, 2) }],
+    };
+  }
+);
+
 // --- Start ---
 
 async function main() {
