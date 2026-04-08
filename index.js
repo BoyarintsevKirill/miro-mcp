@@ -45,21 +45,20 @@ function snap(value) {
   return Math.round(value / 50) * 50;
 }
 
-// Calculate absolute position for an element inside a frame
-// frame: {x, y, width, height} (frame center + dimensions)
-// col, row: grid position (0-based) inside the frame
-// cols: total columns in layout
-// itemWidth, itemHeight: size of the item being placed
+// Calculate RELATIVE position for an element inside a frame
+// When using parent:{id:frameId}, coordinates are relative to frame's top-left corner
+// frame: {width, height} (frame dimensions)
+// col, row: grid position (0-based)
+// cols: total columns
+// itemWidth, itemHeight: size of item
 // padding: distance from frame edges
 function frameCell(frame, col, row, cols, itemWidth = 200, itemHeight = 200, padding = 60) {
+  const titleOffset = 60; // space for frame title bar
   const innerW = frame.width - padding * 2;
-  const innerH = frame.height - padding * 2;
   const cellW = innerW / cols;
-  const topLeftX = frame.x - frame.width / 2 + padding;
-  const topLeftY = frame.y - frame.height / 2 + padding + 50; // +50 for frame title
   return {
-    x: snap(topLeftX + cellW * col + cellW / 2),
-    y: snap(topLeftY + (itemHeight + 30) * row + itemHeight / 2),
+    x: snap(padding + cellW * col + cellW / 2),
+    y: snap(titleOffset + padding + (itemHeight + 30) * row + itemHeight / 2),
   };
 }
 
@@ -382,7 +381,7 @@ server.registerTool(
     for (let i = 0; i < items.length; i++) {
       const col = i % cols;
       const row = Math.floor(i / cols);
-      const pos = frameCell({ x: fx, y: fy, width: fw, height: fh }, col, row, cols);
+      const pos = frameCell({ width: fw, height: fh }, col, row, cols);
       const sem = items[i].semantic || "primary";
 
       try {
@@ -449,12 +448,17 @@ server.registerTool(
       id: frame_id,
       center: { x: fx, y: fy },
       size: { width: fw, height: fh },
-      topLeft: { x: fx - fw / 2, y: fy - fh / 2 },
-      bottomRight: { x: fx + fw / 2, y: fy + fh / 2 },
-      safeArea: {
-        description: "Place elements within these bounds (60px padding + 50px title offset)",
-        topLeft: { x: snap(fx - fw / 2 + 60), y: snap(fy - fh / 2 + 110) },
-        bottomRight: { x: snap(fx + fw / 2 - 60), y: snap(fy + fh / 2 - 60) },
+      relativeCoords: {
+        description: "When using parent:{id:frameId}, positions are RELATIVE to frame top-left. Use these bounds.",
+        safeTopLeft: { x: 60, y: 120 },
+        safeBottomRight: { x: snap(fw - 60), y: snap(fh - 60) },
+        safeWidth: fw - 120,
+        safeHeight: fh - 180,
+      },
+      absoluteCoords: {
+        description: "When NOT using parent, use absolute canvas coordinates.",
+        topLeft: { x: fx - fw / 2, y: fy - fh / 2 },
+        bottomRight: { x: fx + fw / 2, y: fy + fh / 2 },
       },
     });
   }
