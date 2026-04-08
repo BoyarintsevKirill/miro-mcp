@@ -7,7 +7,7 @@ MCP сервер для работы с досками Miro. Позволяет 
 ## Быстрый старт
 
 ```bash
-git clone https://github.com/kirill-boyarintsev/miro-mcp.git
+git clone https://github.com/BoyarintsevKirill/miro-mcp.git
 cd miro-mcp && npm install
 claude mcp add miro -e MIRO_TOKEN=<ваш-токен> -- node /полный/путь/до/miro-mcp/index.js
 ```
@@ -62,7 +62,7 @@ claude mcp add miro -e MIRO_TOKEN=<ваш-токен> -- node /полный/пу
 Склонируйте репозиторий и установите зависимости:
 
 ```bash
-git clone https://github.com/kirill-boyarintsev/miro-mcp.git
+git clone https://github.com/BoyarintsevKirill/miro-mcp.git
 cd miro-mcp
 npm install
 ```
