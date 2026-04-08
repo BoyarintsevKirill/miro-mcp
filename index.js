@@ -353,6 +353,7 @@ server.registerTool(
       board_id: z.string().describe("Board ID"),
       frame_id: z.string().describe("Frame ID to place items inside"),
       columns: z.number().optional().describe("Number of columns (default: auto)"),
+      item_width: z.number().optional().describe("Width of each item in pixels (default: auto-calculated to fit frame)"),
       items: z
         .array(
           z.object({
@@ -367,13 +368,13 @@ server.registerTool(
         .describe("Array of items to create"),
     },
   },
-  async ({ board_id, frame_id, columns, items }) => {
+  async ({ board_id, frame_id, columns, item_width, items }) => {
     const frame = await miroFetch(boardPath(board_id, `/frames/${frame_id}`));
     const fw = frame.geometry.width;
     const fh = frame.geometry.height;
-    const fx = frame.position.x;
-    const fy = frame.position.y;
     const cols = columns || Math.min(items.length, Math.max(2, Math.ceil(Math.sqrt(items.length))));
+    const padding = 60;
+    const autoWidth = item_width || Math.min(250, Math.floor((fw - padding * 2) / cols - 30));
     const style = boardStyle();
     const t = theme();
 
@@ -393,6 +394,7 @@ server.registerTool(
               data: { content: items[i].content },
               style: { fillColor: stickyColor(sem) },
               position: { x: pos.x, y: pos.y },
+              geometry: { width: autoWidth },
               parent: { id: frame_id },
             }),
           });
