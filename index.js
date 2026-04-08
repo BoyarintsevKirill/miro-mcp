@@ -50,6 +50,26 @@ const server = new McpServer(
 // ==================== BOARDS ====================
 
 server.registerTool(
+  "create_board",
+  {
+    description: "Create a new Miro board",
+    inputSchema: {
+      name: z.string().describe("Board name"),
+      description: z.string().optional().describe("Board description"),
+    },
+  },
+  async ({ name, description }) => {
+    const body = { name };
+    if (description) body.description = description;
+    const data = await miroFetch("/boards", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return ok(data);
+  }
+);
+
+server.registerTool(
   "list_boards",
   {
     description: "List all boards the user has access to",
