@@ -1,0 +1,37 @@
+{
+  "name": "miro-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Miro boards. Create, read, update, delete sticky notes, shapes, frames, text, connectors, cards, images, tags via Claude Code.",
+  "main": "index.js",
+  "type": "module",
+  "bin": {
+    "miro-mcp": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "mcp",
+    "miro",
+    "model-context-protocol",
+    "claude",
+    "claude-code",
+    "sticky-notes",
+    "whiteboard",
+    "ai",
+    "board"
+  ],
+  "author": "Kirill Boyarintsev",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kirill-boyarintsev/miro-mcp"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.3.6"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
